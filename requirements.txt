@@ -7,6 +7,6 @@ ollama>=0.4.0
 # chromadb>=0.5.0
 # sentence-transformers>=3.0.0
 
-# Phase 4 — Telegram (add when we get there)
-# python-telegram-bot>=21.0
-# python-dotenv>=1.0.0   # needed again here, for the bot token
+# Phase 4 — Telegram interface
+python-telegram-bot>=21.0
+python-dotenv>=1.0.0
