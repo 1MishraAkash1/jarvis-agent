@@ -23,7 +23,7 @@ retrieval-augmented generation (RAG), and bot integration.
       path for broad "what do you know about me?" questions — see note below)
 - [x] Phase 4 — Telegram interface
 - [x] Phase 5a — voice IN (Telegram voice notes → text, via faster-whisper)
-- [ ] Phase 5b — voice OUT (spoken replies)
+- [x] Phase 5b — voice OUT (spoken replies, via Piper TTS)
 
 ## Setup
 

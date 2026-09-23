@@ -16,3 +16,9 @@ python-dotenv>=1.0.0
 # (~2GB) for something this does without it. First transcription auto-downloads
 # the "base" model (~150MB) from Hugging Face, then it's cached locally.
 faster-whisper>=1.0.0
+
+# Phase 5b — voice OUT (text-to-speech)
+# Piper runs on ONNX Runtime, not PyTorch — same "avoid heavy deps" reasoning
+# as everything else in this project. Unlike faster-whisper, the voice model
+# needs a one-time manual download (see README) rather than auto-downloading.
+piper-tts>=1.8.0
