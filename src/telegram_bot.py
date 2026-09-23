@@ -22,12 +22,13 @@ from anyone else are silently ignored.
 
 import asyncio
 import os
+import tempfile
 
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
-
 from agent import new_conversation, process_message
+from voice.transcribe import transcribe_audio
 
 load_dotenv()
 
@@ -81,9 +82,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(reply_text)
 
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id != ALLOWED_USER_ID:
+        print(f"  [ignored voice note from unauthorized user id={user_id}]")
+        return
+
+    print("You (Telegram): [voice note received, transcribing...]")
+
+    # Telegram voice notes are stored server-side; get_file() gives us a
+    # short-lived download handle, then we pull the actual bytes down to a
+    # temp file. Whisper needs a real file path, not raw bytes in memory,
+    # so this temp file is just a hand-off point.
+    voice_file = await context.bot.get_file(update.message.voice.file_id)
+
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        await voice_file.download_to_drive(tmp_path)
+
+        # Both the download-to-disk step above and the transcription below
+        # are blocking I/O/CPU work — same reasoning as process_message()
+        # already gets in handle_message(): run it off the event loop.
+        transcript = await asyncio.to_thread(transcribe_audio, tmp_path)
+    finally:
+        # Always clean up, even if transcription raised — this is a temp
+        # file with someone's spoken words in it, no reason to let it pile
+        # up on disk.
+        os.remove(tmp_path)
+
+    transcript = transcript.strip()
+    if not transcript:
+        print("Jarvis: [could not make out any speech in that voice note]\n")
+        await update.message.reply_text(
+            "I couldn't make out any speech in that voice note — could you try again?"
+        )
+        return
+
+    print(f"You (Telegram, transcribed): {transcript}")
+
+    reply_text = await asyncio.to_thread(process_message, transcript, messages)
+
+    print(f"Jarvis: {reply_text}\n")
+
+    # Echo the transcript back first so you can actually tell, especially
+    # on this first test, whether Whisper heard you correctly — if the
+    # reply seems off, this line is how you'll know it's an STT mistake
+    # and not Jarvis misunderstanding a correctly-heard message.
+    await update.message.reply_text(f"Heard: \"{transcript}\"\n\n{reply_text}")
+
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     print("Jarvis Telegram bot running. Message your bot on Telegram to talk to it.")
     print("Press Ctrl+C to stop.\n")
