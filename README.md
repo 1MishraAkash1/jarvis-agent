@@ -22,7 +22,8 @@ retrieval-augmented generation (RAG), and bot integration.
 - [x] Phase 3 — persistent memory (retrieval-based, with a deterministic
       path for broad "what do you know about me?" questions — see note below)
 - [x] Phase 4 — Telegram interface
-- [ ] Phase 5 — voice (stretch goal)
+- [x] Phase 5a — voice IN (Telegram voice notes → text, via faster-whisper)
+- [ ] Phase 5b — voice OUT (spoken replies)
 
 ## Setup
 
