@@ -1,7 +1,7 @@
 """
-Phase 1-3 — the core agent loop (Ollama / local model, RAG, memory).
+Phase 1-4 — the core agent loop (Ollama / local model, RAG, memory).
 
-How context assembly works now (v2): every message you type gets checked
+How context assembly works (v2): every message you type gets checked
 against two sources before it reaches the model —
   1. Your notes (Phase 2) — via vector similarity search over notes/.
   2. Your saved facts (Phase 3) — via vector similarity search over things
@@ -13,15 +13,20 @@ prompt size (and therefore response speed) bounded as your notes and
 memory grow, instead of both silently getting bigger forever.
 
 One special case: a broad "what do you know about me?"-style question is
-answered WITHOUT calling the model at all — see the comment in main()
-below for why. Repeated testing showed this 3B model drops facts even when
-they're correctly present in its context; code that reads the stored data
-directly is 100% reliable where model synthesis wasn't.
+answered WITHOUT calling the model at all — repeated testing showed this
+3B model drops facts even when they're correctly present in its context;
+code that reads the stored data directly is 100% reliable where model
+synthesis wasn't.
 
 The tool-calling mechanics are unchanged from Phase 1: Ollama doesn't
 auto-execute tools like Gemini's SDK did, so we send tool schemas, the
 model asks for a tool call, we run the actual Python function, and send
 the result back for a final answer.
+
+Phase 4 note: process_message() below is the reusable core — both this
+file's terminal loop (main()) and telegram_bot.py call it, so Jarvis
+behaves identically from either front-end instead of the logic living in
+two places and drifting apart.
 """
 
 import json
@@ -127,6 +132,14 @@ TOOLS_SCHEMA = [
 ]
 
 SYSTEM_INSTRUCTION = (
+    "You are a helpful personal assistant. You have tools available, but "
+    "most messages do not need one. Only call a tool when the user's "
+    "message explicitly requires current data (the real date/time), a "
+    "calculation you cannot do reliably in your head, or a fact worth "
+    "remembering permanently across sessions (use remember_fact for that — "
+    "e.g. the user's name, a stated preference, an ongoing project). "
+    "Greetings, opinions, and general questions get a direct answer with "
+    "NO tool call. When in doubt, answer directly. Be concise. "
     "For general knowledge questions (history, public figures, how things "
     "work), answer normally from what you know — you don't need any "
     "special context for that, it's fine to just answer. The one thing to "
@@ -198,10 +211,109 @@ def build_augmented_message(user_input: str) -> str:
     )
 
 
-def main() -> None:
-    messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+def new_conversation() -> list:
+    """Returns a fresh messages list with just the system prompt — the
+    starting point for a new conversation, whether from the CLI or a new
+    Telegram chat."""
+    return [{"role": "system", "content": SYSTEM_INSTRUCTION}]
 
-    print(f"Jarvis (Phase 1-3, Ollama/{MODEL}) — type 'quit' to exit.\n")
+
+def process_message(user_input: str, messages: list) -> str:
+    """The core of Jarvis: takes one user message plus the running
+    conversation history, does everything (broad-recall check, RAG/memory
+    retrieval, tool calling), mutates `messages` in place with the new
+    turns, and returns the final reply text.
+
+    This is the single entry point both the terminal (agent.py's main())
+    and the Telegram bot (telegram_bot.py) call — neither knows or cares
+    about tool calls, retrieval, or Ollama directly. That's the point of
+    pulling this out: one interface, reused everywhere Jarvis needs to
+    talk to someone, instead of duplicating this logic per front-end and
+    having them drift out of sync with each other over time.
+    """
+    # Broad "what do you know about me?"-style questions are answered
+    # deterministically, without calling the model at all. Repeated
+    # testing showed the model drops facts even when they're correctly
+    # present in its context — a synthesis limitation of a small model,
+    # not a data problem. Code that just reads the stored data directly
+    # is 100% reliable here, where "usually right" isn't good enough.
+    if is_broad_recall_query(user_input):
+        facts_text = load_all_facts_text()
+        notes_text = load_all_notes_text()
+        parts = [p for p in (facts_text, notes_text) if p]
+        answer = (
+            "Here's everything I have on you:\n\n" + "\n\n".join(parts)
+            if parts else
+            "I don't have anything saved about you yet."
+        )
+        messages.append({"role": "user", "content": user_input})
+        messages.append({"role": "assistant", "content": answer})
+        return answer
+
+    augmented_input = build_augmented_message(user_input)
+    messages.append({"role": "user", "content": augmented_input})
+
+    try:
+        response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS_SCHEMA)
+    except Exception as exc:  # noqa: BLE001
+        messages.pop()  # don't keep a user turn that never got a reply
+        return (
+            f"(couldn't reach Ollama — is it running? "
+            f"Try 'ollama serve' in another terminal. Error: {exc})"
+        )
+
+    reply = response["message"]
+
+    # Defensive fallback: sometimes the model writes a tool call as raw
+    # JSON text in its answer instead of using the proper structured
+    # tool_calls field (more likely under a complex prompt). Detect and
+    # treat that the same as a real tool call, instead of showing the
+    # user garbage.
+    content = (reply.get("content") or "").strip()
+    if not reply.get("tool_calls") and content.startswith("{") and '"name"' in content:
+        try:
+            parsed = json.loads(content)
+            if "name" in parsed and "arguments" in parsed:
+                reply["tool_calls"] = [{"function": {
+                    "name": parsed["name"],
+                    "arguments": parsed["arguments"],
+                }}]
+                print("  [recovered a malformed text-mode tool call]")
+        except (json.JSONDecodeError, TypeError):
+            pass  # wasn't actually a tool call in disguise — leave as plain text
+
+    # If the model wants to call a tool, it puts the request(s) here
+    # instead of (or alongside) a text answer.
+    if reply.get("tool_calls"):
+        messages.append(reply)  # record that the model asked for a tool
+        for tool_call in reply["tool_calls"]:
+            result = _run_tool_call(tool_call)
+            print(f"  [tool call: {tool_call['function']['name']}"
+                  f"({tool_call['function']['arguments']}) -> {result}]")
+            messages.append({
+                "role": "tool",
+                "content": result,
+                "name": tool_call["function"]["name"],
+            })
+
+        # Call the model again, now with the tool result in context,
+        # so it can write a final answer using that result.
+        final_response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS_SCHEMA)
+        final_reply = final_response["message"]
+        messages.append(final_reply)
+        return final_reply["content"]
+    else:
+        messages.append(reply)
+        return reply["content"]
+
+
+def main() -> None:
+    """Terminal front-end: reads from stdin, prints to stdout, in a loop.
+    All the actual logic lives in process_message() above — this function
+    is now just I/O plumbing around it."""
+    messages = new_conversation()
+
+    print(f"Jarvis (Phase 1-4, Ollama/{MODEL}) — type 'quit' to exit.\n")
     while True:
         user_input = input("You: ").strip()
         if user_input.lower() in {"quit", "exit"}:
@@ -209,82 +321,8 @@ def main() -> None:
         if not user_input:
             continue
 
-        # Broad "what do you know about me?"-style questions are answered
-        # deterministically, without calling the model at all. Repeated
-        # testing showed the model drops facts even when they're correctly
-        # present in its context — a synthesis limitation of a small model,
-        # not a data problem. Code that just reads the stored data directly
-        # is 100% reliable here, where "usually right" isn't good enough.
-        if is_broad_recall_query(user_input):
-            facts_text = load_all_facts_text()
-            notes_text = load_all_notes_text()
-            parts = [p for p in (facts_text, notes_text) if p]
-            answer = (
-                "Here's everything I have on you:\n\n" + "\n\n".join(parts)
-                if parts else
-                "I don't have anything saved about you yet."
-            )
-            print(f"Jarvis: {answer}\n")
-            messages.append({"role": "user", "content": user_input})
-            messages.append({"role": "assistant", "content": answer})
-            continue
-
-        augmented_input = build_augmented_message(user_input)
-        messages.append({"role": "user", "content": augmented_input})
-
-        try:
-            response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS_SCHEMA)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"Jarvis: (couldn't reach Ollama — is it running? "
-                f"Try 'ollama serve' in another terminal. Error: {exc})\n"
-            )
-            messages.pop()  # don't keep a user turn that never got a reply
-            continue
-
-        reply = response["message"]
-
-        # Defensive fallback: sometimes the model writes a tool call as raw
-        # JSON text in its answer instead of using the proper structured
-        # tool_calls field (more likely under a complex prompt). Detect and
-        # treat that the same as a real tool call, instead of showing the
-        # user garbage.
-        content = (reply.get("content") or "").strip()
-        if not reply.get("tool_calls") and content.startswith("{") and '"name"' in content:
-            try:
-                parsed = json.loads(content)
-                if "name" in parsed and "arguments" in parsed:
-                    reply["tool_calls"] = [{"function": {
-                        "name": parsed["name"],
-                        "arguments": parsed["arguments"],
-                    }}]
-                    print("  [recovered a malformed text-mode tool call]")
-            except (json.JSONDecodeError, TypeError):
-                pass  # wasn't actually a tool call in disguise — leave as plain text
-
-        # If the model wants to call a tool, it puts the request(s) here
-        # instead of (or alongside) a text answer.
-        if reply.get("tool_calls"):
-            messages.append(reply)  # record that the model asked for a tool
-            for tool_call in reply["tool_calls"]:
-                result = _run_tool_call(tool_call)
-                print(f"  [tool call: {tool_call['function']['name']}"
-                      f"({tool_call['function']['arguments']}) -> {result}]")
-                messages.append({
-                    "role": "tool",
-                    "content": result,
-                    "name": tool_call["function"]["name"],
-                })
-
-            # Call the model again, now with the tool result in context,
-            # so it can write a final answer using that result.
-            final_response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS_SCHEMA)
-            final_reply = final_response["message"]
-            print(f"Jarvis: {final_reply['content']}\n")
-            messages.append(final_reply)
-        else:
-            print(f"Jarvis: {reply['content']}\n")
-            messages.append(reply)
+        reply_text = process_message(user_input, messages)
+        print(f"Jarvis: {reply_text}\n")
 
 
 if __name__ == "__main__":
