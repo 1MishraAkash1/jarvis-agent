@@ -29,6 +29,7 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from agent import new_conversation, process_message
 from voice.transcribe import transcribe_audio
+from voice.synthesize import convert_wav_to_ogg, synthesize_speech
 
 load_dotenv()
 
@@ -131,8 +132,36 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # reply seems off, this line is how you'll know it's an STT mistake
     # and not Jarvis misunderstanding a correctly-heard message.
     await update.message.reply_text(f"Heard: \"{transcript}\"\n\n{reply_text}")
+    
+    # Phase 5b: since you spoke to Jarvis, speak the reply back too. Text
+    # messages still get text-only replies (handle_message never calls
+    # this) — voice in gets voice out, typing gets typing back. The text
+    # reply above is sent regardless, so a TTS failure here never costs
+    # you the actual answer.
+    await send_voice_reply(update, reply_text)
 
+async def send_voice_reply(update: Update, text: str) -> None:
+    """Synthesizes text to speech and sends it back as a Telegram voice
+    message. Best-effort: if Piper's voice model isn't downloaded yet, or
+    ffmpeg isn't installed, this logs a warning and does nothing further —
+    it never raises, since the text reply was already sent and is the
+    part that actually matters."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_tmp:
+        wav_path = wav_tmp.name
+    ogg_path = wav_path.replace(".wav", ".ogg")
 
+    try:
+        await asyncio.to_thread(synthesize_speech, text, wav_path)
+        await asyncio.to_thread(convert_wav_to_ogg, wav_path, ogg_path)
+        with open(ogg_path, "rb") as ogg_file:
+            await update.message.reply_voice(ogg_file)
+    except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring
+        print(f"  [voice reply failed, sent text only: {exc}]")
+    finally:
+        for path in (wav_path, ogg_path):
+            if os.path.exists(path):
+                os.remove(path)
+                
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
