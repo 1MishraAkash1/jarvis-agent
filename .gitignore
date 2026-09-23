@@ -8,9 +8,11 @@ __pycache__/
 .venv/
 venv/
 
-# Local data (grows large, personal)
-data/*.db
-data/*.sqlite
+# Local data (grows large, personal — never commit any of this)
+# Broad pattern, not just *.db/*.sqlite: Chroma (Phase 2) stores its index
+# as a folder with nested binary files, which a narrower glob would miss.
+data/*
+!data/.gitkeep
 notes/*
 !notes/.gitkeep
 
