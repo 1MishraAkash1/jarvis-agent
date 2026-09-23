@@ -1,0 +1,12 @@
+# Phase 1 — core agent loop (local model via Ollama)
+# Requires the Ollama app/daemon installed and running separately —
+# this package is just the Python client that talks to it.
+ollama>=0.4.0
+
+# Phase 2 — RAG (add when we get there)
+# chromadb>=0.5.0
+# sentence-transformers>=3.0.0
+
+# Phase 4 — Telegram (add when we get there)
+# python-telegram-bot>=21.0
+# python-dotenv>=1.0.0   # needed again here, for the bot token
