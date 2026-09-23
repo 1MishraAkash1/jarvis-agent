@@ -34,6 +34,7 @@ ourselves: `messages` is a plain list we keep appending to. Gemini's
 
 import ollama
 
+from rag.retrieve import retrieve_relevant_chunks
 from tools.basic_tools import calculate, get_current_datetime
 
 # qwen2.5:3b-instruct — chosen after llama3.1:8b measured 8-13s per reply on
@@ -133,7 +134,22 @@ def main() -> None:
         if not user_input:
             continue
 
-        messages.append({"role": "user", "content": user_input})
+        # Phase 2: check whether any indexed notes are relevant to this
+        # message before sending it to the model. If nothing in notes/ is
+        # a close match (e.g. "hello"), this returns [] and behavior is
+        # identical to Phase 1 — no notes get injected for casual chat.
+        relevant_chunks = retrieve_relevant_chunks(user_input)
+        if relevant_chunks:
+            print(f"  [retrieved {len(relevant_chunks)} relevant note chunk(s)]")
+            context_block = "\n\n---\n\n".join(relevant_chunks)
+            augmented_input = (
+                f"Relevant notes:\n{context_block}\n\n"
+                f"Using the notes above if they help, answer: {user_input}"
+            )
+        else:
+            augmented_input = user_input
+
+        messages.append({"role": "user", "content": augmented_input})
 
         try:
             response = ollama.chat(model=MODEL, messages=messages, tools=TOOLS_SCHEMA)
