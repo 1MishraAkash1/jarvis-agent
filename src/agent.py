@@ -35,6 +35,7 @@ import ollama
 
 from rag.retrieve import load_all_notes_text, retrieve_relevant_chunks
 from tools.basic_tools import calculate, get_current_datetime
+from tools.email_tools import search_emails
 from tools.memory_tools import (
     get_relevant_facts_text,
     is_broad_recall_query,
@@ -57,6 +58,7 @@ AVAILABLE_FUNCTIONS = {
     "get_current_datetime": get_current_datetime,
     "calculate": calculate,
     "remember_fact": remember_fact,
+    "search_emails": search_emails,
 }
 
 # Ollama (like OpenAI, and most tool-calling APIs) wants each tool described
@@ -129,6 +131,36 @@ TOOLS_SCHEMA = [
             },
         },
     },
+        {
+        "type": "function",
+        "function": {
+            "name": "search_emails",
+            "description": (
+                "Searches the user's Gmail inbox and returns matching "
+                "emails' sender, subject, date, and a short snippet. "
+                "READ-ONLY — cannot send, reply, delete, or modify "
+                "anything. Use Gmail search syntax for the query, e.g. "
+                "'is:unread', 'from:someone@example.com', "
+                "'subject:invoice', 'newer_than:2d'. Only call this when "
+                "the user explicitly asks about their email/inbox — "
+                "never as a guess or for an unrelated question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Gmail search syntax, e.g. 'is:unread from:boss@example.com'.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max number of emails to return (default 5, max 10).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 SYSTEM_INSTRUCTION = (
@@ -137,7 +169,10 @@ SYSTEM_INSTRUCTION = (
     "message explicitly requires current data (the real date/time), a "
     "calculation you cannot do reliably in your head, or a fact worth "
     "remembering permanently across sessions (use remember_fact for that — "
-    "e.g. the user's name, a stated preference, an ongoing project). "
+    "e.g. the user's name, a stated preference, an ongoing project), or a "
+    "request about the user's email/inbox (use search_emails for that — "
+    "it is READ-ONLY, it cannot send or delete anything, so never claim "
+    "you sent, replied to, or deleted an email). "
     "Greetings, opinions, and general questions get a direct answer with "
     "NO tool call. When in doubt, answer directly. Be concise. "
     "For general knowledge questions (history, public figures, how things "

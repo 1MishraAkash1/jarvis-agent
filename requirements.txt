@@ -22,3 +22,7 @@ faster-whisper>=1.0.0
 # as everything else in this project. Unlike faster-whisper, the voice model
 # needs a one-time manual download (see README) rather than auto-downloading.
 piper-tts>=1.8.0
+
+# Phase 6a — Gmail integration (read-only)
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.100.0
